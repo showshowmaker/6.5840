@@ -12,25 +12,30 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	files   []string
-	NReduce int
+	//要处理的文件数量，有几个文件就说明有几个map任务
+	files []string
+	//reduce任务数量
+	nReduce int
 	//0: not started, 1: in progress, 2: done
+	//map和reduce的任务状态，states数组中0表示未开始，1表示进行中，2表示已完成
+	//在超时处理中，如果进行中的任务超时，会将state置为0，重新分配任务
 	mapStates    []int
 	reduceStates []int
-	mapDone      bool
-	reduceDone   bool
+	//阶段性判断，map和reduce任务是否完成
+	mapDone    bool
+	reduceDone bool
+	//map生成的中间文件的名字的中间字段，例如mr-0-1，FileNameMid中会存储0，在worker的reduce执行阶段会依据这个中间字段来生产该reduce需要的文件名
+	fileNamesMid []string
 
-	FileNamesMid []string
-
+	//记录map和reduce任务的开始时间，用于超时处理
 	mapStartTimes    []time.Time
 	reduceStartTimes []time.Time
 }
 
 // Your code here -- RPC handlers for the worker to call.
-
 func (c *Coordinator) AllocateJob(args *Request, reply *Response) error {
 	// Your code here.
-	reply.NReduce = c.NReduce
+	//先分配map任务，map任务都完成了就分配reduce任务，reduce任务都完成了就返回AllFinished，worker根据这个返回值来判断是否可以退出
 	if !c.mapDone {
 		for i, state := range c.mapStates {
 			if state == 0 {
@@ -38,25 +43,19 @@ func (c *Coordinator) AllocateJob(args *Request, reply *Response) error {
 				reply.JobType = MapJob
 				reply.MapJobID = i
 				reply.FileName = c.files[i]
-				// if reply.FileName == "" {
-				// 	fmt.Println("filename is empty ", i)
-				// }
-				// fmt.Println(reply.FileName, " ", i)
-				reply.NReduce = c.NReduce
+				reply.NReduce = c.nReduce
 				c.mapStates[i] = 1
 				c.mapStartTimes[i] = time.Now()
 				return nil
 			}
 		}
 	} else if !c.reduceDone {
-		// c.reduceDone = true
-		// return nil
 		for i, state := range c.reduceStates {
 			if state == 0 {
 				reply.HasJob = true
 				reply.JobType = ReduceJob
 				reply.ReduceJobID = i
-				reply.FileNameMid = c.FileNamesMid
+				reply.FileNameMid = c.fileNamesMid
 				c.reduceStates[i] = 1
 				c.reduceStartTimes[i] = time.Now()
 				return nil
@@ -70,11 +69,11 @@ func (c *Coordinator) AllocateJob(args *Request, reply *Response) error {
 
 func (c *Coordinator) FinishJob(args *Request, reply *Response) error {
 	// Your code here.
+	//worker完成任务后调用这个函数，coordinator以此更新任务状态
 	reply.Stop = false
-	reply.NReduce = c.NReduce
 	if args.JobType == MapJob {
 		c.mapStates[args.JobID] = 2
-		c.FileNamesMid = append(c.FileNamesMid, fmt.Sprintf("%d", args.JobID))
+		c.fileNamesMid = append(c.fileNamesMid, fmt.Sprintf("%d", args.JobID))
 		mapDone := true
 		for _, state := range c.mapStates {
 			if state != 2 {
@@ -102,16 +101,9 @@ func (c *Coordinator) FinishJob(args *Request, reply *Response) error {
 	return nil
 }
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
 func (c *Coordinator) timeoutHandler() {
 	// Your code here.
+	//超市处理，如果任务超时，将任务状态置为0，重新分配任务
 	for !c.reduceDone {
 		time.Sleep(3 * time.Second)
 		for i, state := range c.mapStates {
@@ -133,6 +125,14 @@ func (c *Coordinator) timeoutHandler() {
 	}
 }
 
+// an example RPC handler.
+//
+// the RPC argument and reply types are defined in rpc.go.
+func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
+	reply.Y = args.X + 1
+	return nil
+}
+
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
@@ -152,7 +152,6 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
 	//ret := false
-
 	// Your code here.
 	return c.reduceDone
 }
@@ -165,7 +164,7 @@ func MakeCoordinator(files []string, NReduce int) *Coordinator {
 
 	// Your code here.
 	c.files = files
-	c.NReduce = NReduce
+	c.nReduce = NReduce
 	// fmt.Println("initNReduce: ", NReduce)
 	c.mapStates = make([]int, len(files))
 	c.reduceStates = make([]int, NReduce)

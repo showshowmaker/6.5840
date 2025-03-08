@@ -37,10 +37,11 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
 	// Your worker implementation here.
 	for {
+		//无限循环待机，只有在coordinator通知任务已经全部完成之后才会退出
 		reply := CallForJob()
+		//说明可以退出
 		if reply == nil || reply.JobType == AllFinished {
 			return
 		}
@@ -48,12 +49,14 @@ func Worker(mapf func(string, string) []KeyValue,
 		// if reply.NReduce == 0 {
 		// 	return
 		// }
+		//没有job就待机一段时间再次请求
 		if !reply.HasJob {
 			time.Sleep(1 * time.Second)
 			continue
 		}
 		if reply.JobType == MapJob {
 			// fmt.Println("map ", reply.FileName)
+			//mapjob，参考mrsequential
 			file, err := os.Open(reply.FileName)
 			if err != nil {
 				log.Fatalf("map cannot open %v", reply.FileName)
@@ -66,12 +69,12 @@ func Worker(mapf func(string, string) []KeyValue,
 			kva := mapf(reply.FileName, string(content))
 			files := make([]*os.File, reply.NReduce)
 			encoders := make([]*json.Encoder, reply.NReduce)
-			midFilenames := make([]string, reply.NReduce)
+			midFileNames := make([]string, reply.NReduce)
 			for i := 0; i < reply.NReduce; i++ {
-				midFilenames[i] = fmt.Sprintf("mr-%d-%d", reply.MapJobID, i)
-				file, err := os.Create(midFilenames[i])
+				midFileNames[i] = fmt.Sprintf("mr-%d-%d", reply.MapJobID, i)
+				file, err := os.Create(midFileNames[i])
 				if err != nil {
-					log.Fatalf("cannot create %v", midFilenames[i])
+					log.Fatalf("cannot create %v", midFileNames[i])
 				}
 				files[i] = file
 				encoders[i] = json.NewEncoder(file)
@@ -88,11 +91,13 @@ func Worker(mapf func(string, string) []KeyValue,
 			for i := 0; i < reply.NReduce; i++ {
 				files[i].Close()
 			}
+			//任务完成，通知coordinator
 			reply = CallForFin(reply.JobType, reply.MapJobID)
 			if reply.Stop {
 				return
 			}
 		} else if reply.JobType == ReduceJob {
+			//reducejob，参考mrsequential
 			reduceId := reply.ReduceJobID
 			// fmt.Println("reduce ", filename)
 			files := make([]*os.File, len(reply.FileNameMid))
@@ -146,6 +151,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
+// worker请求分配job
 func CallForJob() *Response {
 	args := Request{}
 	reply := Response{}
@@ -159,10 +165,11 @@ func CallForJob() *Response {
 	}
 }
 
-func CallForFin(jobType JobType, id int) *Response {
+// worker完成job之后通知coordinator
+func CallForFin(jobType JobType, jobID int) *Response {
 	args := Request{}
 	args.JobType = jobType
-	args.JobID = id
+	args.JobID = jobID
 	reply := Response{}
 	ok := call("Coordinator.FinishJob", &args, &reply)
 	if ok {
@@ -222,4 +229,5 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 }
 
 // bash test-mr.sh
+// bash test-mr-many.sh 10
 // bash mytest.sh
