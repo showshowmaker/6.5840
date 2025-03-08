@@ -1,48 +1,181 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
+)
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
+	for {
+		reply := CallForJob()
+		if reply == nil || reply.JobType == AllFinished {
+			return
+		}
+		// fmt.Println("NReduce: ", reply.NReduce)
+		// if reply.NReduce == 0 {
+		// 	return
+		// }
+		if !reply.HasJob {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		if reply.JobType == MapJob {
+			// fmt.Println("map ", reply.FileName)
+			file, err := os.Open(reply.FileName)
+			if err != nil {
+				log.Fatalf("map cannot open %v", reply.FileName)
+			}
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("cannot read %v", reply.FileName)
+			}
+			file.Close()
+			kva := mapf(reply.FileName, string(content))
+			files := make([]*os.File, reply.NReduce)
+			encoders := make([]*json.Encoder, reply.NReduce)
+			midFilenames := make([]string, reply.NReduce)
+			for i := 0; i < reply.NReduce; i++ {
+				midFilenames[i] = fmt.Sprintf("mr-%d-%d", reply.MapJobID, i)
+				file, err := os.Create(midFilenames[i])
+				if err != nil {
+					log.Fatalf("cannot create %v", midFilenames[i])
+				}
+				files[i] = file
+				encoders[i] = json.NewEncoder(file)
+			}
+			for _, kv := range kva {
+				// if reply.NReduce == 0 {
+				// 	fmt.Println("NReduce is 0")
+				// }
+				err := encoders[ihash(kv.Key)%reply.NReduce].Encode(&kv)
+				if err != nil {
+					log.Fatalf("cannot encode %v", kv)
+				}
+			}
+			for i := 0; i < reply.NReduce; i++ {
+				files[i].Close()
+			}
+			reply = CallForFin(reply.JobType, reply.MapJobID)
+			if reply.Stop {
+				return
+			}
+		} else if reply.JobType == ReduceJob {
+			reduceId := reply.ReduceJobID
+			// fmt.Println("reduce ", filename)
+			files := make([]*os.File, len(reply.FileNameMid))
+			decoders := make([]*json.Decoder, len(reply.FileNameMid))
+			for i, mid := range reply.FileNameMid {
+				filename := fmt.Sprintf("mr-%s-%d", mid, reduceId)
+				// fmt.Println("reduce ", filename)
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatalf("reduce cannot open %v", file)
+				}
+				files[i] = file
+				decoders[i] = json.NewDecoder(file)
+			}
+			intermediate := []KeyValue{}
+			for _, decoder := range decoders {
+				for {
+					var kv KeyValue
+					if err := decoder.Decode(&kv); err != nil {
+						break
+					}
+					intermediate = append(intermediate, kv)
+				}
+			}
+			sort.Sort(ByKey(intermediate))
+			// fmt.Printf("intermediate len %d\n", len(intermediate))
+			oname := fmt.Sprintf("mr-out-%d", reduceId)
+			ofile, _ := os.Create(oname)
+			i := 0
+			for i < len(intermediate) {
+				j := i + 1
+				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intermediate[k].Value)
+				}
+				output := reducef(intermediate[i].Key, values)
+				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+				i = j
+			}
+			reply = CallForFin(reply.JobType, reply.ReduceJobID)
+			if reply.Stop {
+				return
+			}
+		}
+	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
 }
 
-//
+func CallForJob() *Response {
+	args := Request{}
+	reply := Response{}
+	ok := call("Coordinator.AllocateJob", &args, &reply)
+	if ok {
+		// fmt.Println(reply)
+		return &reply
+	} else {
+		fmt.Printf("call failed!\n")
+		return nil
+	}
+}
+
+func CallForFin(jobType JobType, id int) *Response {
+	args := Request{}
+	args.JobType = jobType
+	args.JobID = id
+	reply := Response{}
+	ok := call("Coordinator.FinishJob", &args, &reply)
+	if ok {
+		return &reply
+	} else {
+		fmt.Printf("call failed!\n")
+		return nil
+	}
+}
+
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -67,11 +200,9 @@ func CallExample() {
 	}
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
@@ -89,3 +220,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	fmt.Println(err)
 	return false
 }
+
+// bash test-mr.sh
+// bash mytest.sh
