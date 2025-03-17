@@ -161,7 +161,7 @@ func (c *Coordinator) Done() bool {
 // NReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, NReduce int) *Coordinator {
 	c := Coordinator{}
-
+	//初始化coordinator
 	// Your code here.
 	c.files = files
 	c.nReduce = NReduce
