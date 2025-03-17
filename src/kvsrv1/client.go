@@ -1,11 +1,12 @@
 package kvsrv
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"fmt"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt   *tester.Clnt
@@ -30,7 +31,24 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	var args rpc.GetArgs
+	var reply rpc.GetReply
+	args.Key = key
+	for {
+		ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+		if !ok {
+			fmt.Println("Get failed")
+			return "", 0, rpc.ErrNoKey
+		}
+		if reply.Err == rpc.OK {
+			return reply.Value, reply.Version, rpc.OK
+		} else if reply.Err == rpc.ErrNoKey {
+			return "", 0, rpc.ErrNoKey
+		} else {
+			continue
+		}
+	}
+	// return "", 0, rpc.ErrNoKey
 }
 
 // Put updates key with value only if the version in the
@@ -52,5 +70,15 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return rpc.ErrNoKey
+	var args rpc.PutArgs
+	var reply rpc.PutReply
+	args.Key = key
+	args.Value = value
+	args.Version = version
+	ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+	if !ok {
+		fmt.Println("Get failed")
+		return rpc.ErrNoKey
+	}
+	return reply.Err
 }
